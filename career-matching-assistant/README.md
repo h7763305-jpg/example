@@ -43,10 +43,23 @@ python3 scripts/run_mvp.py --output outputs/result.txt
 - 懸念点
 - 追加確認すべき質問
 
+## Web
+
+入力内容に合わせてマッチする企業を検索する静的Web画面を起動します。
+
+```bash
+python3 -m http.server 4173
+```
+
+ブラウザで以下を開きます。
+
+```txt
+http://127.0.0.1:4173/web/index.html
+```
+
 ## Selection Labels
 
 - マッチ度が高い
 - マッチしている
 - 条件確認が必要
 - 現時点ではマッチが弱い
-

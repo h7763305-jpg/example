@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>企業マッチング検索</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-labelledby="page-title">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">面談内容との照合</p>
+            <h1 id="page-title">マッチする企業検索</h1>
+          </div>
+          <div class="status-panel" aria-live="polite">
+            <span class="status-dot"></span>
+            <span id="statusText">入力待ち</span>
+          </div>
+        </header>
+
+        <div class="tool-grid">
+          <section class="input-pane" aria-labelledby="input-title">
+            <div class="section-heading">
+              <h2 id="input-title">入力内容</h2>
+              <div class="sample-switcher" aria-label="サンプル入力">
+                <button class="sample-button active" type="button" data-sample="backend">Backend</button>
+                <button class="sample-button" type="button" data-sample="frontend">Frontend</button>
+                <button class="sample-button" type="button" data-sample="ai">AI</button>
+              </div>
+            </div>
+
+            <textarea
+              id="interviewInput"
+              class="interview-input"
+              spellcheck="false"
+              placeholder="面談内容を入力"
+            ></textarea>
+
+            <div class="action-row">
+              <button id="clearButton" class="ghost-button" type="button">クリア</button>
+              <button id="reloadSampleButton" class="primary-button" type="button">サンプル入力</button>
+            </div>
+          </section>
+
+          <section class="analysis-pane" aria-labelledby="analysis-title">
+            <div class="section-heading">
+              <h2 id="analysis-title">抽出条件</h2>
+              <span id="signalCount" class="count-badge">0件</span>
+            </div>
+            <div id="profileSignals" class="signal-list" aria-live="polite"></div>
+          </section>
+        </div>
+
+        <section class="results-section" aria-labelledby="results-title">
+          <div class="section-heading results-heading">
+            <div>
+              <h2 id="results-title">選出企業</h2>
+              <p id="resultSummary" class="muted">入力内容から企業を照合します。</p>
+            </div>
+            <div class="filter-tabs" aria-label="選出区分フィルター">
+              <button class="filter-button active" type="button" data-filter="all">すべて</button>
+              <button class="filter-button" type="button" data-filter="strong">高い</button>
+              <button class="filter-button" type="button" data-filter="check">確認</button>
+            </div>
+          </div>
+          <div id="companyResults" class="company-grid" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
