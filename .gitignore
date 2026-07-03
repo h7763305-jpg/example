@@ -1,4 +1,4 @@
-test.txt
-test.txt2
-test.txt3
-test.txt4
+*.pyc
+.venv/
+.venv39/
+.pycache39/
