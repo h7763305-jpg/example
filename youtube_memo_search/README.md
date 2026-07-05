@@ -1,6 +1,6 @@
 # YouTube Memo Search
 
-メモ欄に入力した内容から、アプリ内の YouTube を自動検索する PySide6 アプリです。
+メモ欄に入力した内容から、YouTube を自動検索する tkinter + Selenium アプリです。
 
 ## セットアップ
 
@@ -17,7 +17,7 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
-起動すると、1 つのアプリ窓の左半分にメモ欄、右半分に YouTube が表示されます。
+起動すると、左半分にメモ欄、右半分に Selenium が操作するブラウザが開きます。
 メモ入力が止まってから約 1 秒後に、メモ内容から検索語を作って YouTube 検索を実行します。
 
 ## 使い方
@@ -29,5 +29,6 @@ python3 app.py
 
 ## 注意
 
-- YouTube は PySide6 の内蔵ブラウザで表示します。
-- 初回セットアップ時は PySide6 のインストールに時間がかかる場合があります。
+- Chrome がインストールされている環境を想定しています。
+- Selenium Manager が自動で対応ドライバを取得します。初回だけ時間がかかる場合があります。
+- YouTube の画面は tkinter 内に埋め込むのではなく、Selenium が起動したブラウザを右半分に配置します。

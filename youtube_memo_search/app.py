@@ -2,28 +2,19 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
+import tkinter as tk
+from dataclasses import dataclass
+from tkinter import messagebox, ttk
 from urllib.parse import quote_plus
 
 try:
-    from PySide6.QtCore import QCoreApplication, QLibraryInfo, QPluginLoader, QTimer, QUrl
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWidgets import (
-        QApplication,
-        QCheckBox,
-        QHBoxLayout,
-        QLabel,
-        QMainWindow,
-        QMessageBox,
-        QPushButton,
-        QSizePolicy,
-        QSplitter,
-        QTextEdit,
-        QToolBar,
-        QWidget,
-    )
-except (ImportError, ModuleNotFoundError) as exc:
+    from selenium import webdriver
+    from selenium.common.exceptions import WebDriverException
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+except ModuleNotFoundError as exc:
     print(
-        "PySide6 がインストールされていません。\n"
+        "selenium がインストールされていません。\n"
         "次のコマンドでセットアップしてから起動してください。\n\n"
         "cd /Users/izumikahiroto/Desktop/dev/youtube_memo_search\n"
         "python3 -m venv .venv\n"
@@ -39,19 +30,31 @@ YOUTUBE_HOME_URL = "https://www.youtube.com/"
 YOUTUBE_SEARCH_URL = "https://www.youtube.com/results?search_query={query}"
 SEARCH_DELAY_MS = 1000
 MAX_SEARCH_TEXT_LENGTH = 80
-QT_PLUGIN_LOADERS: list[QPluginLoader] = []
 
 
-def prepare_qt_plugins() -> None:
-    """macOS で Qt の platform plugin 探索が外れる環境向けに明示設定する。"""
-    plugins_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)
-    QCoreApplication.setLibraryPaths([plugins_path])
+@dataclass(frozen=True)
+class WindowLayout:
+    screen_width: int
+    screen_height: int
+    left_width: int
+    right_width: int
+    usable_height: int
 
-    if sys.platform == "darwin":
-        cocoa_plugin = f"{plugins_path}/platforms/libqcocoa.dylib"
-        loader = QPluginLoader(cocoa_plugin)
-        loader.load()
-        QT_PLUGIN_LOADERS.append(loader)
+
+def create_layout(root: tk.Tk) -> WindowLayout:
+    """画面サイズから、左のメモ欄と右のブラウザ領域を決める。"""
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    left_width = max(520, screen_width // 2)
+    right_width = max(520, screen_width - left_width)
+    usable_height = max(640, screen_height - 80)
+    return WindowLayout(
+        screen_width=screen_width,
+        screen_height=screen_height,
+        left_width=left_width,
+        right_width=right_width,
+        usable_height=usable_height,
+    )
 
 
 def build_search_text(memo_text: str, use_latest_line: bool) -> str:
@@ -66,122 +69,192 @@ def build_search_text(memo_text: str, use_latest_line: bool) -> str:
     return source_text[:MAX_SEARCH_TEXT_LENGTH]
 
 
-class App(QMainWindow):
-    """メモ入力欄と YouTube を 1 つのアプリ窓に並べる。"""
+class YouTubeBrowser:
+    """Selenium が操作するブラウザを管理する。"""
+
+    def __init__(self, layout: WindowLayout) -> None:
+        self.layout = layout
+        self.driver: webdriver.Chrome | None = None
+        self.lock = threading.Lock()
+
+    def start(self) -> None:
+        with self.lock:
+            if self.driver is not None:
+                return
+
+            options = ChromeOptions()
+            options.add_argument("--disable-infobars")
+            options.add_argument("--disable-notifications")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+            driver = webdriver.Chrome(options=options)
+            driver.set_window_rect(
+                x=self.layout.left_width,
+                y=0,
+                width=self.layout.right_width,
+                height=self.layout.usable_height,
+            )
+            driver.get(YOUTUBE_HOME_URL)
+            self.driver = driver
+
+    def search(self, search_text: str) -> bool:
+        if not search_text:
+            return False
+
+        with self.lock:
+            if self.driver is None:
+                return False
+            encoded_query = quote_plus(search_text)
+            self.driver.get(YOUTUBE_SEARCH_URL.format(query=encoded_query))
+            return True
+
+    def close(self) -> None:
+        with self.lock:
+            if self.driver is None:
+                return
+            self.driver.quit()
+            self.driver = None
+
+
+class App(tk.Tk):
+    """tkinter のメモ入力画面と Selenium 検索処理をつなぐ。"""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("YouTube Memo Search")
+        self.title("YouTube Memo Search")
 
+        self.layout_info = create_layout(self)
+        self.geometry(f"{self.layout_info.left_width}x{self.layout_info.usable_height}+0+0")
+        self.minsize(480, 520)
+
+        self.browser = YouTubeBrowser(self.layout_info)
+        self.search_after_id: str | None = None
         self.last_search_text = ""
-        self.search_timer = QTimer(self)
-        self.search_timer.setSingleShot(True)
-        self.search_timer.timeout.connect(self.search_now)
+        self.latest_line_only = tk.BooleanVar(value=True)
+        self.status_text = tk.StringVar(value="ブラウザを起動しています...")
 
         self._build_ui()
-        self._size_window()
-        self.browser.setUrl(QUrl(YOUTUBE_HOME_URL))
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(100, self._start_browser)
 
     def _build_ui(self) -> None:
-        toolbar = QToolBar("検索")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        search_button = QPushButton("今すぐ検索")
-        search_button.clicked.connect(self.search_now)
-        toolbar.addWidget(search_button)
+        toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
+        toolbar.grid(row=0, column=0, sticky="ew")
+        toolbar.columnconfigure(1, weight=1)
 
-        self.latest_line_only = QCheckBox("直近の行を検索")
-        self.latest_line_only.setChecked(True)
-        self.latest_line_only.stateChanged.connect(self.schedule_search)
-        toolbar.addWidget(self.latest_line_only)
+        search_button = ttk.Button(toolbar, text="今すぐ検索", command=self._search_now)
+        search_button.grid(row=0, column=0, sticky="w")
 
-        splitter = QSplitter()
-        self.memo = QTextEdit()
-        self.memo.setPlaceholderText("メモを書くと、右側の YouTube で自動検索します。")
-        self.memo.setAcceptRichText(False)
-        self.memo.setStyleSheet(
-            "QTextEdit { font-size: 15px; padding: 10px; border: 1px solid #c8c8c8; }"
+        check = ttk.Checkbutton(
+            toolbar,
+            text="直近の行を検索",
+            variable=self.latest_line_only,
+            command=self._schedule_search,
         )
-        self.memo.textChanged.connect(self.schedule_search)
+        check.grid(row=0, column=1, sticky="w", padx=(12, 0))
 
-        self.browser = QWebEngineView()
-        self.browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.browser.loadStarted.connect(lambda: self.status_label.setText("読み込み中..."))
-        self.browser.loadFinished.connect(self._on_load_finished)
+        note_frame = ttk.Frame(self, padding=(12, 0, 12, 8))
+        note_frame.grid(row=1, column=0, sticky="nsew")
+        note_frame.columnconfigure(0, weight=1)
+        note_frame.rowconfigure(0, weight=1)
 
-        splitter.addWidget(self.memo)
-        splitter.addWidget(self.browser)
-        splitter.setSizes([520, 820])
-        splitter.setChildrenCollapsible(False)
+        self.memo = tk.Text(
+            note_frame,
+            wrap="word",
+            undo=True,
+            font=("Hiragino Sans", 15),
+            padx=12,
+            pady=12,
+            relief="solid",
+            borderwidth=1,
+        )
+        self.memo.grid(row=0, column=0, sticky="nsew")
+        self.memo.bind("<KeyRelease>", self._on_memo_changed)
 
-        self.setCentralWidget(splitter)
+        scrollbar = ttk.Scrollbar(note_frame, orient="vertical", command=self.memo.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.memo.configure(yscrollcommand=scrollbar.set)
 
-        status_widget = QWidget()
-        status_layout = QHBoxLayout(status_widget)
-        status_layout.setContentsMargins(8, 2, 8, 2)
-        self.status_label = QLabel("YouTube をアプリ内に読み込んでいます。")
-        status_layout.addWidget(self.status_label)
-        self.statusBar().addPermanentWidget(status_widget, 1)
+        status = ttk.Label(self, textvariable=self.status_text, padding=(12, 0, 12, 12))
+        status.grid(row=2, column=0, sticky="ew")
 
-    def _size_window(self) -> None:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            self.resize(1360, 760)
+    def _start_browser(self) -> None:
+        threading.Thread(target=self._start_browser_in_background, daemon=True).start()
+
+    def _start_browser_in_background(self) -> None:
+        try:
+            self.browser.start()
+        except WebDriverException as exc:
+            self.after(0, self._show_browser_error, exc)
             return
 
-        available = screen.availableGeometry()
-        width = min(1440, max(1100, int(available.width() * 0.92)))
-        height = min(900, max(680, int(available.height() * 0.88)))
-        self.resize(width, height)
-        self.move(
-            available.x() + max(0, (available.width() - width) // 2),
-            available.y() + max(0, (available.height() - height) // 2),
+        self.after(0, self.status_text.set, "メモを書くと、右側の YouTube で自動検索します。")
+
+    def _show_browser_error(self, exc: WebDriverException) -> None:
+        self.status_text.set("ブラウザの起動に失敗しました。")
+        messagebox.showerror(
+            "Selenium エラー",
+            "Chrome または ChromeDriver の起動に失敗しました。\n\n"
+            "requirements.txt の依存関係をインストールし、Chrome が入っているか確認してください。\n\n"
+            f"{exc}",
         )
 
-    def schedule_search(self) -> None:
-        self.search_timer.start(SEARCH_DELAY_MS)
+    def _on_memo_changed(self, _event: tk.Event) -> None:
+        self._schedule_search()
 
-    def search_now(self) -> None:
-        self.search_timer.stop()
-        search_text = build_search_text(
-            self.memo.toPlainText(),
-            self.latest_line_only.isChecked(),
-        )
+    def _schedule_search(self) -> None:
+        if self.search_after_id is not None:
+            self.after_cancel(self.search_after_id)
+        self.search_after_id = self.after(SEARCH_DELAY_MS, self._search_now)
+
+    def _search_now(self) -> None:
+        self.search_after_id = None
+        memo_text = self.memo.get("1.0", "end").strip()
+        search_text = build_search_text(memo_text, self.latest_line_only.get())
 
         if not search_text:
-            self.status_label.setText("検索するメモを書いてください。")
+            self.status_text.set("検索するメモを書いてください。")
             return
         if search_text == self.last_search_text:
             return
 
-        encoded_query = quote_plus(search_text)
-        self.last_search_text = search_text
-        self.status_label.setText(f"検索中: {search_text}")
-        self.browser.setUrl(QUrl(YOUTUBE_SEARCH_URL.format(query=encoded_query)))
+        self.status_text.set(f"検索中: {search_text}")
+        threading.Thread(target=self._search_in_background, args=(search_text,), daemon=True).start()
 
-    def _on_load_finished(self, ok: bool) -> None:
-        if ok:
-            if self.last_search_text:
-                self.status_label.setText(f"YouTube 検索済み: {self.last_search_text}")
-            else:
-                self.status_label.setText("メモを書くと、右側の YouTube で自動検索します。")
+    def _search_in_background(self, search_text: str) -> None:
+        try:
+            searched = self.browser.search(search_text)
+        except WebDriverException as exc:
+            self.after(0, self._show_search_error, exc)
             return
 
-        self.status_label.setText("YouTube の読み込みに失敗しました。")
-        QMessageBox.warning(
-            self,
-            "読み込みエラー",
-            "YouTube の読み込みに失敗しました。ネットワーク接続を確認してください。",
-        )
+        if not searched:
+            self.after(0, self.status_text.set, "ブラウザ起動後にもう一度検索します。")
+            self.after(SEARCH_DELAY_MS, self._search_now)
+            return
+
+        self.last_search_text = search_text
+        self.after(0, self.status_text.set, f"YouTube 検索済み: {search_text}")
+
+    def _show_search_error(self, exc: WebDriverException) -> None:
+        self.status_text.set("検索に失敗しました。")
+        messagebox.showerror("検索エラー", f"YouTube 検索に失敗しました。\n\n{exc}")
+
+    def _on_close(self) -> None:
+        self.status_text.set("終了しています...")
+        try:
+            self.browser.close()
+        finally:
+            self.destroy()
 
 
 def main() -> int:
-    prepare_qt_plugins()
-    app = QApplication(sys.argv)
-    window = App()
-    window.show()
-    return app.exec()
+    app = App()
+    app.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
