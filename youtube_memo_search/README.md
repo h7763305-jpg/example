@@ -1,6 +1,7 @@
-# YouTube Memo Search
+# Memo Search
 
-メモ欄に入力した内容から、ボタン操作で YouTube を検索する tkinter + Selenium アプリです。
+Tkinter のメモ欄に入力した内容から、Selenium でブラウザ検索を操作する試作アプリです。
+現在は食べログ検索を主対象にし、既存の YouTube 検索も切り替えで残しています。
 
 ## セットアップ
 
@@ -17,22 +18,39 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
-起動すると、左半分にメモ欄、右半分に Selenium が操作するブラウザが開きます。
-メモを書いて「検索」を押すと、メモ内容から検索語を作って YouTube 検索を実行します。
-URL を貼って「検索」を押した場合は、その URL を直接開きます。
-入力中は YouTube に反映しません。
-YouTube のタブや Chrome ウィンドウを閉じた場合も、次の検索時に Chrome を開き直します。
+起動すると、左半分にメモ欄、右半分に Selenium が操作する Chrome が開きます。
+メモを書いて「検索」を押すと、食べログ向けにエリア、ジャンル、予算、キーワードをルールベースで抽出して検索します。
 
-## 使い方
+## メモ例
 
-- メモ欄に検索したい内容を書きます。
-- 「検索」を押すと YouTube に反映します。
-- URL を開きたい場合は、`https://...` や `youtube.com/...` を貼って「検索」を押します。
-- 「直近の行を検索」がオンの場合は、最後に書いた空でない行だけを検索します。
-- オフにすると、メモ全体から検索語を作ります。
+```text
+渋谷で焼肉。夜で5000円以内。個室がある店。
+```
+
+抽出例:
+
+```json
+{
+  "area": "渋谷",
+  "genre": "焼肉",
+  "budget": 5000,
+  "keywords": ["個室", "夜"]
+}
+```
+
+## ファイル構成
+
+- `app.py`: Tkinter 画面と検索ボタン処理
+- `memo_parser.py`: メモから食べログ検索条件を抽出
+- `selenium_browser.py`: Chrome 起動、画面配置、ページ移動、終了処理
+- `tabelog_search.py`: 食べログの入力欄、予算欄、検索ボタン操作
+- `tabelog_selectors.py`: 食べログ画面の selector 管理
+- `youtube_search.py`: YouTube 検索処理
+- `inspect_tabelog.py`: 食べログ画面の selector 確認用スクリプト
 
 ## 注意
 
 - Chrome がインストールされている環境を想定しています。
 - Selenium Manager が自動で対応ドライバを取得します。初回だけ時間がかかる場合があります。
-- YouTube の画面は tkinter 内に埋め込むのではなく、Selenium が起動したブラウザを右半分に配置します。
+- 食べログの画面構造が変わると selector の調整が必要です。その場合は `tabelog_selectors.py` を更新します。
+- 予算は食べログの結果ページにある上限予算 `LstCosT` に反映します。

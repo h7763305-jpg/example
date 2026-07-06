@@ -1,20 +1,23 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
 import tkinter as tk
-from dataclasses import dataclass
 from tkinter import messagebox, ttk
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 try:
-    from selenium import webdriver
     from selenium.common.exceptions import WebDriverException
-    from selenium.webdriver.chrome.options import Options as ChromeOptions
+
+    from memo_parser import extract_tabelog_conditions
+    from selenium_browser import SeleniumBrowser, WindowLayout
+    from tabelog_search import TABELOG_HOME_URL, search_tabelog
+    from youtube_search import YOUTUBE_HOME_URL, search_youtube
 except ModuleNotFoundError as exc:
     print(
-        "selenium がインストールされていません。\n"
+        "selenium がインストールされていない。\n"
         "次のコマンドでセットアップしてから起動してください。\n\n"
         "cd /Users/izumikahiroto/Desktop/dev/youtube_memo_search\n"
         "python3 -m venv .venv\n"
@@ -26,18 +29,11 @@ except ModuleNotFoundError as exc:
     raise SystemExit(1) from exc
 
 
-YOUTUBE_HOME_URL = "https://www.youtube.com/"
-YOUTUBE_SEARCH_URL = "https://www.youtube.com/results?search_query={query}"
 MAX_SEARCH_TEXT_LENGTH = 80
-
-
-@dataclass(frozen=True)
-class WindowLayout:
-    screen_width: int
-    screen_height: int
-    left_width: int
-    right_width: int
-    usable_height: int
+SEARCH_TARGETS = {
+    "食べログ": TABELOG_HOME_URL,
+    "YouTube": YOUTUBE_HOME_URL,
+}
 
 
 def create_layout(root: tk.Tk) -> WindowLayout:
@@ -67,18 +63,13 @@ def build_memo_target_text(memo_text: str, use_latest_line: bool) -> str:
     return re.sub(r"\s+", " ", source_text).strip()
 
 
-def build_search_text(memo_text: str, use_latest_line: bool) -> str:
-    """メモの入力内容から YouTube 検索に使う短い文字列を作る。"""
-    return build_memo_target_text(memo_text, use_latest_line)[:MAX_SEARCH_TEXT_LENGTH]
-
-
 def normalize_url(text: str) -> str | None:
     """URLとして開ける文字列なら、ブラウザ用のURLに整える。"""
     candidate = text.strip()
     if not candidate or re.search(r"\s", candidate):
         return None
 
-    if candidate.startswith(("www.", "youtube.com/", "youtu.be/")):
+    if candidate.startswith(("www.", "youtube.com/", "youtu.be/", "tabelog.com/")):
         candidate = f"https://{candidate}"
 
     parsed = urlparse(candidate)
@@ -88,122 +79,23 @@ def normalize_url(text: str) -> str | None:
     return None
 
 
-class YouTubeBrowser:
-    """Selenium が操作するブラウザを管理する。"""
-
-    def __init__(self, layout: WindowLayout) -> None:
-        self.layout = layout
-        self.driver: webdriver.Chrome | None = None
-        self.lock = threading.Lock()
-
-    def start(self) -> None:
-        with self.lock:
-            if self._driver_is_ready():
-                return
-
-            self._discard_driver()
-            self.driver = self._create_driver(YOUTUBE_HOME_URL)
-
-    def search(self, search_text: str) -> bool:
-        if not search_text:
-            return False
-
-        with self.lock:
-            encoded_query = quote_plus(search_text)
-            search_url = YOUTUBE_SEARCH_URL.format(query=encoded_query)
-            self._navigate(search_url)
-            return True
-
-    def open_url(self, url: str) -> bool:
-        if not url:
-            return False
-
-        with self.lock:
-            self._navigate(url)
-            return True
-
-    def is_open(self) -> bool:
-        with self.lock:
-            return self._driver_is_ready()
-
-    def close(self) -> None:
-        with self.lock:
-            self._discard_driver()
-
-    def _create_driver(self, start_url: str) -> webdriver.Chrome:
-        options = ChromeOptions()
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-notifications")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-
-        driver = webdriver.Chrome(options=options)
-        driver.set_window_rect(
-            x=self.layout.left_width,
-            y=0,
-            width=self.layout.right_width,
-            height=self.layout.usable_height,
-        )
-        driver.get(start_url)
-        return driver
-
-    def _navigate_without_stealing_focus(self, url: str) -> None:
-        if self.driver is None:
-            return
-
-        try:
-            self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
-        except WebDriverException:
-            self.driver.get(url)
-
-    def _navigate(self, url: str) -> None:
-        if not self._driver_is_ready():
-            self._discard_driver()
-            self.driver = self._create_driver(url)
-            return
-
-        self._navigate_without_stealing_focus(url)
-
-    def _driver_is_ready(self) -> bool:
-        if self.driver is None:
-            return False
-
-        try:
-            window_handles = self.driver.window_handles
-            if not window_handles:
-                return False
-            self.driver.switch_to.window(window_handles[0])
-        except WebDriverException:
-            return False
-
-        return True
-
-    def _discard_driver(self) -> None:
-        if self.driver is None:
-            return
-
-        try:
-            self.driver.quit()
-        except WebDriverException:
-            pass
-        finally:
-            self.driver = None
-
-
 class App(tk.Tk):
     """tkinter のメモ入力画面と Selenium 検索処理をつなぐ。"""
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("YouTube Memo Search")
+        self.title("Memo Search")
 
         self.layout_info = create_layout(self)
         self.geometry(f"{self.layout_info.left_width}x{self.layout_info.usable_height}+0+0")
-        self.minsize(480, 520)
+        self.minsize(520, 560)
 
-        self.browser = YouTubeBrowser(self.layout_info)
-        self.last_search_text = ""
+        self.search_target = tk.StringVar(value="食べログ")
         self.latest_line_only = tk.BooleanVar(value=True)
         self.status_text = tk.StringVar(value="ブラウザを起動しています...")
+        self.extracted_text = tk.StringVar(value="抽出結果: 未実行")
+        self.last_action_key = ""
+        self.browser = SeleniumBrowser(self.layout_info, SEARCH_TARGETS[self.search_target.get()])
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -215,17 +107,27 @@ class App(tk.Tk):
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(1, weight=1)
+        toolbar.columnconfigure(3, weight=1)
 
         search_button = ttk.Button(toolbar, text="検索", command=lambda: self._search_now(force=True))
         search_button.grid(row=0, column=0, sticky="w")
+
+        target_select = ttk.Combobox(
+            toolbar,
+            textvariable=self.search_target,
+            values=list(SEARCH_TARGETS.keys()),
+            state="readonly",
+            width=10,
+        )
+        target_select.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        target_select.bind("<<ComboboxSelected>>", self._on_target_changed)
 
         check = ttk.Checkbutton(
             toolbar,
             text="直近の行を検索",
             variable=self.latest_line_only,
         )
-        check.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        check.grid(row=0, column=2, sticky="w", padx=(12, 0))
 
         note_frame = ttk.Frame(self, padding=(12, 0, 12, 8))
         note_frame.grid(row=1, column=0, sticky="nsew")
@@ -248,8 +150,21 @@ class App(tk.Tk):
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.memo.configure(yscrollcommand=scrollbar.set)
 
+        result = ttk.Label(
+            self,
+            textvariable=self.extracted_text,
+            padding=(12, 2, 12, 4),
+            wraplength=max(420, self.layout_info.left_width - 24),
+        )
+        result.grid(row=2, column=0, sticky="ew")
+
         status = ttk.Label(self, textvariable=self.status_text, padding=(12, 0, 12, 12))
-        status.grid(row=2, column=0, sticky="ew")
+        status.grid(row=3, column=0, sticky="ew")
+
+    def _on_target_changed(self, _event: tk.Event) -> None:
+        target = self.search_target.get()
+        self.status_text.set(f"検索先を切り替えました: {target}")
+        self.browser.start_url = SEARCH_TARGETS[target]
 
     def _start_browser(self) -> None:
         threading.Thread(target=self._start_browser_in_background, daemon=True).start()
@@ -261,7 +176,7 @@ class App(tk.Tk):
             self.after(0, self._show_browser_error, exc)
             return
 
-        self.after(0, self.status_text.set, "メモを書いて「検索」を押すと、右側の YouTube に反映します。")
+        self.after(0, self.status_text.set, "メモを書いて「検索」を押すと、右側のブラウザに反映します。")
         self.after(0, self._schedule_focus_return)
 
     def _show_browser_error(self, exc: WebDriverException) -> None:
@@ -277,48 +192,60 @@ class App(tk.Tk):
         memo_text = self.memo.get("1.0", "end").strip()
         target_text = build_memo_target_text(memo_text, self.latest_line_only.get())
         target_url = normalize_url(target_text)
-        search_text = target_text[:MAX_SEARCH_TEXT_LENGTH]
 
         if not target_text:
             self.status_text.set("検索するメモを書いてください。")
             return
 
-        action_key = f"url:{target_url}" if target_url else f"search:{search_text}"
-        if not force and action_key == self.last_search_text and self.browser.is_open():
+        search_target = self.search_target.get()
+        action_key = self._build_action_key(search_target, target_text, target_url)
+        if not force and action_key == self.last_action_key and self.browser.is_open():
             return
 
-        if target_url:
-            self.status_text.set(f"URLを開いています: {target_url}")
-        else:
-            self.status_text.set(f"検索中: {search_text}")
-
+        self.status_text.set(f"{search_target}で検索中...")
         threading.Thread(
             target=self._navigate_in_background,
-            args=(target_url, search_text, action_key),
+            args=(search_target, target_url, target_text, action_key),
             daemon=True,
         ).start()
         self._schedule_focus_return()
 
-    def _navigate_in_background(self, target_url: str | None, search_text: str, action_key: str) -> None:
+    def _build_action_key(self, search_target: str, target_text: str, target_url: str | None) -> str:
+        if target_url:
+            return f"{search_target}:url:{target_url}"
+        return f"{search_target}:text:{target_text}"
+
+    def _navigate_in_background(
+        self,
+        search_target: str,
+        target_url: str | None,
+        target_text: str,
+        action_key: str,
+    ) -> None:
         try:
             if target_url:
-                self.browser.open_url(target_url)
+                self.browser.navigate(target_url)
+                self.after(0, self.extracted_text.set, "抽出結果: URLを直接開きました")
+            elif search_target == "食べログ":
+                conditions = extract_tabelog_conditions(target_text)
+                conditions_json = json.dumps(conditions, ensure_ascii=False)
+                self.after(0, self.extracted_text.set, f"抽出結果: {conditions_json}")
+                search_tabelog(self.browser, conditions)
             else:
-                self.browser.search(search_text)
+                search_text = target_text[:MAX_SEARCH_TEXT_LENGTH]
+                self.after(0, self.extracted_text.set, f"検索語: {search_text}")
+                search_youtube(self.browser, search_text)
         except WebDriverException as exc:
             self.after(0, self._show_search_error, exc)
             return
 
-        self.last_search_text = action_key
-        if target_url:
-            self.after(0, self.status_text.set, f"URLを開きました: {target_url}")
-        else:
-            self.after(0, self.status_text.set, f"YouTube 検索済み: {search_text}")
+        self.last_action_key = action_key
+        self.after(0, self.status_text.set, f"{search_target}検索を実行しました。")
         self.after(0, self._schedule_focus_return)
 
     def _show_search_error(self, exc: WebDriverException) -> None:
         self.status_text.set("検索に失敗しました。")
-        messagebox.showerror("検索エラー", f"YouTube 検索に失敗しました。\n\n{exc}")
+        messagebox.showerror("検索エラー", f"検索に失敗しました。\n\n{exc}")
 
     def _return_focus_to_memo(self) -> None:
         try:
