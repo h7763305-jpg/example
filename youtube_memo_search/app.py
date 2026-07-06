@@ -145,6 +145,9 @@ class App(tk.Tk):
             borderwidth=1,
         )
         self.memo.grid(row=0, column=0, sticky="nsew")
+        self.memo.bind("<KeyPress>", self._handle_memo_key)
+        self.memo.bind("<KeyPress-space>", self._insert_space)
+        self.memo.bind("<KeyPress-KP_Space>", self._insert_space)
 
         scrollbar = ttk.Scrollbar(note_frame, orient="vertical", command=self.memo.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -165,6 +168,24 @@ class App(tk.Tk):
         target = self.search_target.get()
         self.status_text.set(f"検索先を切り替えました: {target}")
         self.browser.start_url = SEARCH_TARGETS[target]
+
+    def _handle_memo_key(self, event: tk.Event) -> str | None:
+        if self._is_space_key(event):
+            return self._insert_space(event)
+        return None
+
+    def _is_space_key(self, event: tk.Event) -> bool:
+        # macOSのTkでは日本語入力中にkeysymだけではスペースを拾えない場合がある。
+        return (
+            event.keysym in {"space", "KP_Space"}
+            or event.char in {" ", "　"}
+            or event.keycode == 49
+        )
+
+    def _insert_space(self, _event: tk.Event) -> str:
+        self.memo.insert("insert", " ")
+        print("[ui] スペースを入力")
+        return "break"
 
     def _start_browser(self) -> None:
         threading.Thread(target=self._start_browser_in_background, daemon=True).start()
