@@ -6,7 +6,7 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox, ttk
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 try:
     from selenium import webdriver
@@ -28,7 +28,6 @@ except ModuleNotFoundError as exc:
 
 YOUTUBE_HOME_URL = "https://www.youtube.com/"
 YOUTUBE_SEARCH_URL = "https://www.youtube.com/results?search_query={query}"
-SEARCH_DELAY_MS = 1000
 MAX_SEARCH_TEXT_LENGTH = 80
 
 
@@ -57,16 +56,36 @@ def create_layout(root: tk.Tk) -> WindowLayout:
     )
 
 
-def build_search_text(memo_text: str, use_latest_line: bool) -> str:
-    """メモの入力内容から YouTube 検索に使う短い文字列を作る。"""
+def build_memo_target_text(memo_text: str, use_latest_line: bool) -> str:
+    """メモの入力内容から、検索やURL判定に使う文字列を作る。"""
     lines = [line.strip() for line in memo_text.splitlines() if line.strip()]
     if not lines:
         return ""
 
     source_text = lines[-1] if use_latest_line else " ".join(lines)
     source_text = re.sub(r"^[\s\-・*#\d.)）]+", "", source_text)
-    source_text = re.sub(r"\s+", " ", source_text).strip()
-    return source_text[:MAX_SEARCH_TEXT_LENGTH]
+    return re.sub(r"\s+", " ", source_text).strip()
+
+
+def build_search_text(memo_text: str, use_latest_line: bool) -> str:
+    """メモの入力内容から YouTube 検索に使う短い文字列を作る。"""
+    return build_memo_target_text(memo_text, use_latest_line)[:MAX_SEARCH_TEXT_LENGTH]
+
+
+def normalize_url(text: str) -> str | None:
+    """URLとして開ける文字列なら、ブラウザ用のURLに整える。"""
+    candidate = text.strip()
+    if not candidate or re.search(r"\s", candidate):
+        return None
+
+    if candidate.startswith(("www.", "youtube.com/", "youtu.be/")):
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+
+    return None
 
 
 class YouTubeBrowser:
@@ -79,40 +98,94 @@ class YouTubeBrowser:
 
     def start(self) -> None:
         with self.lock:
-            if self.driver is not None:
+            if self._driver_is_ready():
                 return
 
-            options = ChromeOptions()
-            options.add_argument("--disable-infobars")
-            options.add_argument("--disable-notifications")
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
-
-            driver = webdriver.Chrome(options=options)
-            driver.set_window_rect(
-                x=self.layout.left_width,
-                y=0,
-                width=self.layout.right_width,
-                height=self.layout.usable_height,
-            )
-            driver.get(YOUTUBE_HOME_URL)
-            self.driver = driver
+            self._discard_driver()
+            self.driver = self._create_driver(YOUTUBE_HOME_URL)
 
     def search(self, search_text: str) -> bool:
         if not search_text:
             return False
 
         with self.lock:
-            if self.driver is None:
-                return False
             encoded_query = quote_plus(search_text)
-            self.driver.get(YOUTUBE_SEARCH_URL.format(query=encoded_query))
+            search_url = YOUTUBE_SEARCH_URL.format(query=encoded_query)
+            self._navigate(search_url)
             return True
+
+    def open_url(self, url: str) -> bool:
+        if not url:
+            return False
+
+        with self.lock:
+            self._navigate(url)
+            return True
+
+    def is_open(self) -> bool:
+        with self.lock:
+            return self._driver_is_ready()
 
     def close(self) -> None:
         with self.lock:
-            if self.driver is None:
-                return
+            self._discard_driver()
+
+    def _create_driver(self, start_url: str) -> webdriver.Chrome:
+        options = ChromeOptions()
+        options.add_argument("--disable-infobars")
+        options.add_argument("--disable-notifications")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+        driver = webdriver.Chrome(options=options)
+        driver.set_window_rect(
+            x=self.layout.left_width,
+            y=0,
+            width=self.layout.right_width,
+            height=self.layout.usable_height,
+        )
+        driver.get(start_url)
+        return driver
+
+    def _navigate_without_stealing_focus(self, url: str) -> None:
+        if self.driver is None:
+            return
+
+        try:
+            self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
+        except WebDriverException:
+            self.driver.get(url)
+
+    def _navigate(self, url: str) -> None:
+        if not self._driver_is_ready():
+            self._discard_driver()
+            self.driver = self._create_driver(url)
+            return
+
+        self._navigate_without_stealing_focus(url)
+
+    def _driver_is_ready(self) -> bool:
+        if self.driver is None:
+            return False
+
+        try:
+            window_handles = self.driver.window_handles
+            if not window_handles:
+                return False
+            self.driver.switch_to.window(window_handles[0])
+        except WebDriverException:
+            return False
+
+        return True
+
+    def _discard_driver(self) -> None:
+        if self.driver is None:
+            return
+
+        try:
             self.driver.quit()
+        except WebDriverException:
+            pass
+        finally:
             self.driver = None
 
 
@@ -128,7 +201,6 @@ class App(tk.Tk):
         self.minsize(480, 520)
 
         self.browser = YouTubeBrowser(self.layout_info)
-        self.search_after_id: str | None = None
         self.last_search_text = ""
         self.latest_line_only = tk.BooleanVar(value=True)
         self.status_text = tk.StringVar(value="ブラウザを起動しています...")
@@ -145,14 +217,13 @@ class App(tk.Tk):
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.columnconfigure(1, weight=1)
 
-        search_button = ttk.Button(toolbar, text="今すぐ検索", command=self._search_now)
+        search_button = ttk.Button(toolbar, text="検索", command=lambda: self._search_now(force=True))
         search_button.grid(row=0, column=0, sticky="w")
 
         check = ttk.Checkbutton(
             toolbar,
             text="直近の行を検索",
             variable=self.latest_line_only,
-            command=self._schedule_search,
         )
         check.grid(row=0, column=1, sticky="w", padx=(12, 0))
 
@@ -172,7 +243,6 @@ class App(tk.Tk):
             borderwidth=1,
         )
         self.memo.grid(row=0, column=0, sticky="nsew")
-        self.memo.bind("<KeyRelease>", self._on_memo_changed)
 
         scrollbar = ttk.Scrollbar(note_frame, orient="vertical", command=self.memo.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -191,7 +261,8 @@ class App(tk.Tk):
             self.after(0, self._show_browser_error, exc)
             return
 
-        self.after(0, self.status_text.set, "メモを書くと、右側の YouTube で自動検索します。")
+        self.after(0, self.status_text.set, "メモを書いて「検索」を押すと、右側の YouTube に反映します。")
+        self.after(0, self._schedule_focus_return)
 
     def _show_browser_error(self, exc: WebDriverException) -> None:
         self.status_text.set("ブラウザの起動に失敗しました。")
@@ -202,46 +273,75 @@ class App(tk.Tk):
             f"{exc}",
         )
 
-    def _on_memo_changed(self, _event: tk.Event) -> None:
-        self._schedule_search()
-
-    def _schedule_search(self) -> None:
-        if self.search_after_id is not None:
-            self.after_cancel(self.search_after_id)
-        self.search_after_id = self.after(SEARCH_DELAY_MS, self._search_now)
-
-    def _search_now(self) -> None:
-        self.search_after_id = None
+    def _search_now(self, force: bool = False) -> None:
         memo_text = self.memo.get("1.0", "end").strip()
-        search_text = build_search_text(memo_text, self.latest_line_only.get())
+        target_text = build_memo_target_text(memo_text, self.latest_line_only.get())
+        target_url = normalize_url(target_text)
+        search_text = target_text[:MAX_SEARCH_TEXT_LENGTH]
 
-        if not search_text:
+        if not target_text:
             self.status_text.set("検索するメモを書いてください。")
             return
-        if search_text == self.last_search_text:
+
+        action_key = f"url:{target_url}" if target_url else f"search:{search_text}"
+        if not force and action_key == self.last_search_text and self.browser.is_open():
             return
 
-        self.status_text.set(f"検索中: {search_text}")
-        threading.Thread(target=self._search_in_background, args=(search_text,), daemon=True).start()
+        if target_url:
+            self.status_text.set(f"URLを開いています: {target_url}")
+        else:
+            self.status_text.set(f"検索中: {search_text}")
 
-    def _search_in_background(self, search_text: str) -> None:
+        threading.Thread(
+            target=self._navigate_in_background,
+            args=(target_url, search_text, action_key),
+            daemon=True,
+        ).start()
+        self._schedule_focus_return()
+
+    def _navigate_in_background(self, target_url: str | None, search_text: str, action_key: str) -> None:
         try:
-            searched = self.browser.search(search_text)
+            if target_url:
+                self.browser.open_url(target_url)
+            else:
+                self.browser.search(search_text)
         except WebDriverException as exc:
             self.after(0, self._show_search_error, exc)
             return
 
-        if not searched:
-            self.after(0, self.status_text.set, "ブラウザ起動後にもう一度検索します。")
-            self.after(SEARCH_DELAY_MS, self._search_now)
-            return
-
-        self.last_search_text = search_text
-        self.after(0, self.status_text.set, f"YouTube 検索済み: {search_text}")
+        self.last_search_text = action_key
+        if target_url:
+            self.after(0, self.status_text.set, f"URLを開きました: {target_url}")
+        else:
+            self.after(0, self.status_text.set, f"YouTube 検索済み: {search_text}")
+        self.after(0, self._schedule_focus_return)
 
     def _show_search_error(self, exc: WebDriverException) -> None:
         self.status_text.set("検索に失敗しました。")
         messagebox.showerror("検索エラー", f"YouTube 検索に失敗しました。\n\n{exc}")
+
+    def _return_focus_to_memo(self) -> None:
+        try:
+            self.memo.configure(state="normal")
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(120, self._release_topmost)
+            self.focus_force()
+            self.memo.focus_force()
+        except tk.TclError:
+            return
+
+    def _release_topmost(self) -> None:
+        try:
+            self.attributes("-topmost", False)
+            self.memo.focus_force()
+        except tk.TclError:
+            return
+
+    def _schedule_focus_return(self) -> None:
+        for delay_ms in (50, 200, 500, 1000, 1800):
+            self.after(delay_ms, self._return_focus_to_memo)
 
     def _on_close(self) -> None:
         self.status_text.set("終了しています...")
