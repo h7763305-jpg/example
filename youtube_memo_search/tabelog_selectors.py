@@ -8,6 +8,11 @@ TABELOG_SELECTORS = {
         "input[aria-label*='エリア']",
         "input[type='search'][name*='area']",
     ],
+    "area_suggestion_items": [
+        "li.js-header-search-suggest-items",
+        ".p-global-search-suggest__suggest-items",
+        ".js-header-search-suggest-items",
+    ],
     "keyword_inputs": [
         "input[name='sk']",
         "input[name='sw']",
@@ -28,6 +33,16 @@ TABELOG_SELECTORS = {
     "max_budget_selects": [
         "select[name='LstCosT']",
         "#lstcost-sidebar",
+    ],
+    "visit_date_inputs": [
+        "input[name='search_date']",
+        "input.js-simple-search-date",
+        "input[placeholder*='来店日']",
+    ],
+    "visit_date_hidden_inputs": [
+        "input[name='svd']",
+        "input.js-vacancy-search-svd",
+        "input.svd",
     ],
     "budget_buttons": [
         "button[aria-label*='予算']",

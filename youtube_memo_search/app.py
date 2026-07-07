@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import calendar
 import json
 import re
 import sys
 import threading
 import tkinter as tk
-from datetime import date
 from tkinter import messagebox, ttk
 from urllib.parse import urlparse
 
 try:
     from selenium.common.exceptions import WebDriverException
 
-    from memo_parser import extract_tabelog_conditions
+    from memo_parser import extract_search_date, extract_tabelog_conditions
     from selenium_browser import SeleniumBrowser, WindowLayout
     from tabelog_search import TABELOG_HOME_URL, search_tabelog
     from youtube_search import YOUTUBE_HOME_URL, search_youtube
@@ -32,7 +30,6 @@ except ModuleNotFoundError as exc:
 
 
 MAX_SEARCH_TEXT_LENGTH = 80
-DATE_YEAR_RANGE = 1
 SEARCH_TARGETS = {
     "食べログ": TABELOG_HOME_URL,
     "YouTube": YOUTUBE_HOME_URL,
@@ -55,14 +52,13 @@ def create_layout(root: tk.Tk) -> WindowLayout:
     )
 
 
-def build_memo_target_text(memo_text: str, use_latest_line: bool) -> str:
-    """メモの入力内容から、検索やURL判定に使う文字列を作る。"""
+def build_memo_target_text(memo_text: str) -> str:
+    """メモの入力内容全体から、検索やURL判定に使う文字列を作る。"""
     lines = [line.strip() for line in memo_text.splitlines() if line.strip()]
     if not lines:
         return ""
 
-    source_text = lines[-1] if use_latest_line else " ".join(lines)
-    source_text = re.sub(r"^[\s\-・*#\d.)）]+", "", source_text)
+    source_text = " ".join(lines)
     return re.sub(r"\s+", " ", source_text).strip()
 
 
@@ -94,12 +90,6 @@ class App(tk.Tk):
         self.minsize(520, 560)
 
         self.search_target = tk.StringVar(value="食べログ")
-        self.latest_line_only = tk.BooleanVar(value=True)
-        today = date.today()
-        self.use_search_date = tk.BooleanVar(value=False)
-        self.search_year = tk.StringVar(value=str(today.year))
-        self.search_month = tk.StringVar(value=str(today.month))
-        self.search_day = tk.StringVar(value=str(today.day))
         self.status_text = tk.StringVar(value="ブラウザを起動しています...")
         self.extracted_text = tk.StringVar(value="抽出結果: 未実行")
         self.last_action_key = ""
@@ -115,7 +105,7 @@ class App(tk.Tk):
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 6))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(4, weight=1)
+        toolbar.columnconfigure(2, weight=1)
 
         search_button = ttk.Button(toolbar, text="検索", command=lambda: self._search_now(force=True))
         search_button.grid(row=0, column=0, sticky="w")
@@ -129,61 +119,6 @@ class App(tk.Tk):
         )
         target_select.grid(row=0, column=1, sticky="w", padx=(10, 0))
         target_select.bind("<<ComboboxSelected>>", self._on_target_changed)
-
-        check = ttk.Checkbutton(
-            toolbar,
-            text="直近の行を検索",
-            variable=self.latest_line_only,
-        )
-        check.grid(row=0, column=2, sticky="w", padx=(12, 0))
-
-        date_frame = ttk.Frame(toolbar)
-        date_frame.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(8, 0))
-
-        date_check = ttk.Checkbutton(
-            date_frame,
-            text="日付指定",
-            variable=self.use_search_date,
-            command=self._on_date_toggle,
-        )
-        date_check.grid(row=0, column=0, sticky="w")
-
-        current_year = date.today().year
-        years = [str(year) for year in range(current_year, current_year + DATE_YEAR_RANGE + 1)]
-        self.year_select = ttk.Combobox(
-            date_frame,
-            textvariable=self.search_year,
-            values=years,
-            state="readonly",
-            width=6,
-        )
-        self.year_select.grid(row=0, column=1, sticky="w", padx=(10, 2))
-        ttk.Label(date_frame, text="年").grid(row=0, column=2, sticky="w")
-
-        self.month_select = ttk.Combobox(
-            date_frame,
-            textvariable=self.search_month,
-            values=[str(month) for month in range(1, 13)],
-            state="readonly",
-            width=3,
-        )
-        self.month_select.grid(row=0, column=3, sticky="w", padx=(8, 2))
-        ttk.Label(date_frame, text="月").grid(row=0, column=4, sticky="w")
-
-        self.day_select = ttk.Combobox(
-            date_frame,
-            textvariable=self.search_day,
-            values=[],
-            state="readonly",
-            width=3,
-        )
-        self.day_select.grid(row=0, column=5, sticky="w", padx=(8, 2))
-        ttk.Label(date_frame, text="日").grid(row=0, column=6, sticky="w")
-
-        self.year_select.bind("<<ComboboxSelected>>", self._on_date_part_changed)
-        self.month_select.bind("<<ComboboxSelected>>", self._on_date_part_changed)
-        self._refresh_day_options()
-        self._set_date_controls_state()
 
         note_frame = ttk.Frame(self, padding=(12, 0, 12, 8))
         note_frame.grid(row=1, column=0, sticky="nsew")
@@ -224,44 +159,6 @@ class App(tk.Tk):
         target = self.search_target.get()
         self.status_text.set(f"検索先を切り替えました: {target}")
         self.browser.start_url = SEARCH_TARGETS[target]
-
-    def _on_date_toggle(self) -> None:
-        self._set_date_controls_state()
-
-    def _on_date_part_changed(self, _event: tk.Event) -> None:
-        self._refresh_day_options()
-
-    def _set_date_controls_state(self) -> None:
-        state = "readonly" if self.use_search_date.get() else "disabled"
-        for select in (self.year_select, self.month_select, self.day_select):
-            select.configure(state=state)
-
-    def _refresh_day_options(self) -> None:
-        try:
-            year = int(self.search_year.get())
-            month = int(self.search_month.get())
-        except ValueError:
-            return
-
-        last_day = calendar.monthrange(year, month)[1]
-        day = min(int(self.search_day.get() or "1"), last_day)
-        self.day_select.configure(values=[str(candidate) for candidate in range(1, last_day + 1)])
-        self.search_day.set(str(day))
-
-    def _selected_search_date(self) -> str | None:
-        if not self.use_search_date.get():
-            return None
-
-        try:
-            selected = date(
-                int(self.search_year.get()),
-                int(self.search_month.get()),
-                int(self.search_day.get()),
-            )
-        except ValueError:
-            return None
-
-        return selected.isoformat()
 
     def _handle_memo_key(self, event: tk.Event) -> str | None:
         if self._is_space_key(event):
@@ -305,9 +202,9 @@ class App(tk.Tk):
 
     def _search_now(self, force: bool = False) -> None:
         memo_text = self.memo.get("1.0", "end").strip()
-        target_text = build_memo_target_text(memo_text, self.latest_line_only.get())
+        target_text = build_memo_target_text(memo_text)
         target_url = normalize_url(target_text)
-        selected_date = self._selected_search_date()
+        selected_date = extract_search_date(target_text)
 
         if not target_text:
             self.status_text.set("検索するメモを書いてください。")
@@ -352,7 +249,8 @@ class App(tk.Tk):
                 self.after(0, self.extracted_text.set, "抽出結果: URLを直接開きました")
             elif search_target == "食べログ":
                 conditions = extract_tabelog_conditions(target_text)
-                conditions["date"] = selected_date
+                if conditions.get("date") is None:
+                    conditions["date"] = selected_date
                 conditions_json = json.dumps(conditions, ensure_ascii=False)
                 self.after(0, self.extracted_text.set, f"抽出結果: {conditions_json}")
                 search_tabelog(self.browser, conditions)
