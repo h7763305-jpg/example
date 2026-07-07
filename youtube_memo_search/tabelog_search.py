@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 from urllib.parse import urlencode
 
@@ -138,6 +139,7 @@ def build_fallback_search_url(conditions: dict[str, Any]) -> str:
     """入力欄操作に失敗したとき用に、検索URLを組み立てる。"""
     keyword_text = build_tabelog_keyword_text(conditions)
     budget = conditions.get("budget")
+    selected_date = normalize_search_date(conditions.get("date"))
 
     params: dict[str, str] = {}
     area = conditions.get("area")
@@ -149,6 +151,8 @@ def build_fallback_search_url(conditions: dict[str, Any]) -> str:
     if isinstance(budget, int):
         params["LstCosT"] = get_budget_select_value(budget)
         params["RdoCosTp"] = "2"
+    if selected_date is not None:
+        params["svd"] = selected_date.strftime("%Y%m%d")
 
     query = urlencode(params)
     if not query:
@@ -156,9 +160,27 @@ def build_fallback_search_url(conditions: dict[str, Any]) -> str:
     return f"{TABELOG_SEARCH_URL}?{query}"
 
 
+def normalize_search_date(value: Any) -> date | None:
+    """UIで選ばれた日付文字列を、食べログURLに渡せる日付へ変換する。"""
+    if not isinstance(value, str) or not value:
+        return None
+
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def search_tabelog(browser: SeleniumBrowser, conditions: dict[str, Any]) -> bool:
     """食べログの画面を操作して検索する。"""
     print(f"[tabelog] 検索条件: {conditions}")
+
+    if normalize_search_date(conditions.get("date")) is not None:
+        search_url = build_fallback_search_url(conditions)
+        print(f"[tabelog] 日付指定ありのためURLで検索します: {search_url}")
+        browser.navigate(search_url)
+        return True
+
     open_tabelog_home(browser)
 
     if browser.driver is None:
